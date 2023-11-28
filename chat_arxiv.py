@@ -8,7 +8,7 @@ import os
 import re
 from collections import namedtuple
 
-import arxiv
+# import arxiv
 import fitz
 import numpy as np
 import openai
@@ -18,6 +18,8 @@ import tenacity
 import tiktoken
 from bs4 import BeautifulSoup
 from PIL import Image
+import sys
+
 
 ArxivParams = namedtuple(
     "ArxivParams",
@@ -301,7 +303,8 @@ class Reader:
     def __init__(self, key_word, query,
                  root_path='./',
                  gitee_key='',
-                 sort=arxiv.SortCriterion.SubmittedDate, user_name='defualt', args=None):
+                 sort=None, 
+                 user_name='defualt', args=None):
         self.user_name = user_name  # 读者姓名
         self.key_word = key_word  # 读者感兴趣的关键词
         self.query = query  # 读者输入的搜索查询
@@ -319,7 +322,8 @@ class Reader:
         # 读取配置文件
         self.config.read('apikey.ini')
         OPENAI_KEY = os.environ.get("OPENAI_KEY", "")
-        # 获取某个键对应的值        
+        # 获取某个键对应的值
+        openai.api_base = self.config.get('OpenAI', 'OPENAI_API_BASE')    
         self.chat_api_list = self.config.get('OpenAI', 'OPENAI_API_KEYS')[1:-1].replace('\'', '').split(',')
         self.chat_api_list.append(OPENAI_KEY)
 
@@ -360,16 +364,25 @@ class Reader:
         today = datetime.date.today()
         last_days = datetime.timedelta(days=days)
         for article in articles:
-            title = article.find("p", class_="title").text  # 找到每篇论文的标题，并去掉多余的空格和换行符
-            link = article.find("span").find_all("a")[0].get('href')
-            date_text = article.find("p", class_="is-size-7").text
-            date_text = date_text.split('\n')[0].split("Submitted ")[-1].split("; ")[0]
-            date_text = datetime.datetime.strptime(date_text, "%d %B, %Y").date()
-            if today - date_text <= last_days:
-                titles.append(title.strip())
-                links.append(link)
-                dates.append(date_text)
-            # print("links:", links)
+            try:
+                title = article.find("p", class_="title").text  # 找到每篇论文的标题，并去掉多余的空格和换行符
+                title = title.strip()            
+                link = article.find("span").find_all("a")[0].get('href')            
+                date_text = article.find("p", class_="is-size-7").text
+                date_text = date_text.split('\n')[0].split("Submitted ")[-1].split("; ")[0]
+                date_text = datetime.datetime.strptime(date_text, "%d %B, %Y").date()
+                if today - date_text <= last_days:
+                    titles.append(title.strip())
+                    links.append(link)
+                    dates.append(date_text)
+                # print("links:", links)
+            except Exception as e:
+                print("error:", e)
+                print("error_title:", title)
+                exc_type, exc_obj, exc_tb = sys.exc_info()
+                fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                print(exc_type, fname, exc_tb.tb_lineno)          
+                
         return titles, links, dates
 
     # 定义一个函数，根据关键词获取所有可用的论文标题，并打印出来
@@ -387,14 +400,6 @@ class Reader:
             date_list.extend(dates)
         print("-" * 40)
         return title_list, link_list, date_list
-
-    def get_arxiv(self, max_results=30):
-        search = arxiv.Search(query=self.query,
-                              max_results=max_results,
-                              sort_by=self.sort,
-                              sort_order=arxiv.SortOrder.Descending,
-                              )
-        return search
 
     def get_arxiv_web(self, args, page_num=1, days=2):
         titles, links, dates = self.get_all_titles_from_web(args.query, page_num=page_num, days=days)
@@ -444,15 +449,18 @@ class Reader:
             text = ''
             text += 'Title:' + paper.title
             text += 'Url:' + paper.url
-            text += 'Abstrat:' + paper.abs
+            text += 'Abstract:' + paper.abs
             text += 'Paper_info:' + paper.section_text_dict['paper_info']
             # intro
             text += list(paper.section_text_dict.values())[0]
-
+            chat_summary_text = ""
             try:
                 chat_summary_text = self.chat_summary(text=text)
             except Exception as e:
                 print("summary_error:", e)
+                exc_type, exc_obj, exc_tb = sys.exc_info()
+                fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                print(exc_type, fname, exc_tb.tb_lineno)          
                 if "maximum context" in str(e):
                     current_tokens_index = str(e).find("your messages resulted in") + len(
                         "your messages resulted in") + 1
@@ -461,8 +469,7 @@ class Reader:
                     chat_summary_text = self.chat_summary(text=text, summary_prompt_token=summary_prompt_token)
 
             htmls.append('## Paper:' + str(paper_index + 1))
-            htmls.append('\n\n\n')
-            chat_summary_text = ""
+            htmls.append('\n\n\n')            
             if "chat_summary_text" in locals():
                 htmls.append(chat_summary_text)
 
@@ -473,7 +480,8 @@ class Reader:
                 if 'method' in parse_key.lower() or 'approach' in parse_key.lower():
                     method_key = parse_key
                     break
-
+            
+            chat_method_text = ""
             if method_key != '':
                 text = ''
                 method_text = ''
@@ -487,13 +495,16 @@ class Reader:
                     chat_method_text = self.chat_method(text=text)
                 except Exception as e:
                     print("method_error:", e)
+                    exc_type, exc_obj, exc_tb = sys.exc_info()
+                    fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                    print(exc_type, fname, exc_tb.tb_lineno)          
                     if "maximum context" in str(e):
                         current_tokens_index = str(e).find("your messages resulted in") + len(
                             "your messages resulted in") + 1
                         offset = int(str(e)[current_tokens_index:current_tokens_index + 4])
                         method_prompt_token = offset + 800 + 150
                         chat_method_text = self.chat_method(text=text, method_prompt_token=method_prompt_token)
-                chat_method_text = ""
+                
                 if "chat_method_text" in locals():
                     htmls.append(chat_method_text)
                 # htmls.append(chat_method_text)
@@ -512,6 +523,7 @@ class Reader:
             conclusion_text = ''
             summary_text = ''
             summary_text += "<summary>" + chat_summary_text + "\n <Method summary>:\n" + chat_method_text
+            chat_conclusion_text = ""
             if conclusion_key != '':
                 # conclusion                
                 conclusion_text += paper.section_text_dict[conclusion_key]
@@ -523,14 +535,16 @@ class Reader:
                 chat_conclusion_text = self.chat_conclusion(text=text)
             except Exception as e:
                 print("conclusion_error:", e)
+                exc_type, exc_obj, exc_tb = sys.exc_info()
+                fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                print(exc_type, fname, exc_tb.tb_lineno)  
                 if "maximum context" in str(e):
                     current_tokens_index = str(e).find("your messages resulted in") + len(
                         "your messages resulted in") + 1
                     offset = int(str(e)[current_tokens_index:current_tokens_index + 4])
                     conclusion_prompt_token = offset + 800 + 150
                     chat_conclusion_text = self.chat_conclusion(text=text,
-                                                                conclusion_prompt_token=conclusion_prompt_token)
-            chat_conclusion_text = ""
+                                                                conclusion_prompt_token=conclusion_prompt_token)            
             if "chat_conclusion_text" in locals():
                 htmls.append(chat_conclusion_text)
             htmls.append("\n" * 4)
@@ -721,11 +735,11 @@ def chat_arxiv_main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--query", type=str, default='GPT-4', help="the query string, ti: xx, au: xx, all: xx,")
+    parser.add_argument("--query", type=str, default='traffic flow prediction', help="the query string, ti: xx, au: xx, all: xx,")
     parser.add_argument("--key_word", type=str, default='GPT robot', help="the key word of user research fields")
-    parser.add_argument("--page_num", type=int, default=1, help="the maximum number of page")
-    parser.add_argument("--max_results", type=int, default=1, help="the maximum number of results")
-    parser.add_argument("--days", type=int, default=1, help="the last days of arxiv papers of this query")
+    parser.add_argument("--page_num", type=int, default=2, help="the maximum number of page")
+    parser.add_argument("--max_results", type=int, default=3, help="the maximum number of results")
+    parser.add_argument("--days", type=int, default=10, help="the last days of arxiv papers of this query")
     parser.add_argument("--sort", type=str, default="web", help="another is LastUpdatedDate")
     parser.add_argument("--save_image", default=False,
                         help="save image? It takes a minute or two to save a picture! But pretty")
